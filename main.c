@@ -7,27 +7,37 @@
 #include <sys/select.h> // For non-blocking input (cross-platform)
 
 #define SAMPLE_RATE 44100
-#define FREQUENCY 440.0
 #define AMPLITUDE 0.5
 #define BUFFER_SIZE 4096
 #define WAV_HEADER_SIZE 44
+#define NOTE_DURATION 0.5  // Each note lasts 0.5 seconds
+
+// Frequency mapping for numbers 0-7 (C Major scale)
+const float FREQUENCIES[8] = {261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25};
 
 typedef struct {
     float phase;
-    int playing;
+    float frequency;
 } AudioData;
 
-// Function to check for user input without blocking
-int check_keyboard_input() {
-    struct timeval tv = {0, 0};  // No wait time (non-blocking)
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(STDIN_FILENO, &fds);  // Monitor standard input (keyboard)
-    return select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0;
+// Function to check for user input (blocking)
+char get_user_input()
+{
+    char input;
+    printf("Press 0-7 to play a note, Q to quit: ");
+    input = getchar();
+    while (getchar() != '\n'); // Clear input buffer
+    return input;
 }
 
 // Function to write a valid WAV header
-void write_wav_header(FILE *file) {
+void write_wav_header(FILE *file)
+{
+    uint32_t sampleRate;
+    uint32_t byteRate;
+    
+    sampleRate = SAMPLE_RATE;
+    byteRate = SAMPLE_RATE * 2 * 2;     // 2 channels * 16 bits (2 bytes)
     uint8_t header[WAV_HEADER_SIZE] = {
         'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E',
         'f', 'm', 't', ' ', 16, 0, 0, 0, 1, 0, 2, 0,  // PCM, 2 channels
@@ -37,8 +47,6 @@ void write_wav_header(FILE *file) {
         'd', 'a', 't', 'a', 0, 0, 0, 0  // Data chunk
     };
 
-    uint32_t sampleRate = SAMPLE_RATE;
-    uint32_t byteRate = SAMPLE_RATE * 2 * 2;  // 2 channels * 16 bits (2 bytes)
     memcpy(&header[24], &sampleRate, 4);
     memcpy(&header[28], &byteRate, 4);
 
@@ -46,7 +54,8 @@ void write_wav_header(FILE *file) {
 }
 
 // Function to update the WAV header with the correct data size
-void update_wav_header(FILE *file, uint32_t dataSize) {
+void update_wav_header(FILE *file, uint32_t dataSize)
+{
     fseek(file, 40, SEEK_SET);
     fwrite(&dataSize, sizeof(uint32_t), 1, file);
 
@@ -55,14 +64,23 @@ void update_wav_header(FILE *file, uint32_t dataSize) {
     fwrite(&chunkSize, sizeof(uint32_t), 1, file);
 }
 
-// Function to generate and write audio samples
-void generate_audio_data(FILE *file, AudioData *data, uint32_t *totalDataSize) {
+// Function to generate and write a single note
+void generate_note(FILE *file, AudioData *data, uint32_t *totalDataSize)
+{
     float buffer[BUFFER_SIZE * 2];
-    float phaseStep = 2.0 * M_PI * FREQUENCY / SAMPLE_RATE;
+    uint32_t samplesToGenerate;
+    float phaseStep;
+    int samplesThisLoop;
+    float sampleValue;
+    int16_t sample;
 
-    for (int i = 0; i < BUFFER_SIZE * 2; i += 2) {
-        if (data->playing) {
-            float sampleValue = AMPLITUDE * sinf(data->phase);
+    samplesToGenerate = (uint32_t)(SAMPLE_RATE * NOTE_DURATION);
+    phaseStep = 2.0 * M_PI * data->frequency / SAMPLE_RATE;
+    while (samplesToGenerate > 0) {
+        samplesThisLoop = (samplesToGenerate > BUFFER_SIZE) ? BUFFER_SIZE : samplesToGenerate;
+        
+        for (int i = 0; i < samplesThisLoop * 2; i += 2) {
+            sampleValue = AMPLITUDE * sinf(data->phase);
             buffer[i] = sampleValue;     // Left channel
             buffer[i + 1] = sampleValue; // Right channel
             data->phase += phaseStep;
@@ -70,49 +88,46 @@ void generate_audio_data(FILE *file, AudioData *data, uint32_t *totalDataSize) {
             if (data->phase >= 2 * M_PI) {
                 data->phase -= 2 * M_PI;
             }
-        } else {
-            buffer[i] = 0.0f;
-            buffer[i + 1] = 0.0f;
         }
-    }
 
-    for (int i = 0; i < BUFFER_SIZE * 2; i++) {
-        int16_t sample = (int16_t)(buffer[i] * 32767);
-        fwrite(&sample, sizeof(int16_t), 1, file);
-    }
+        for (int i = 0; i < samplesThisLoop * 2; i++) {
+            sample = (int16_t)(buffer[i] * 32767);
+            fwrite(&sample, sizeof(int16_t), 1, file);
+        }
 
-    *totalDataSize += BUFFER_SIZE * 2 * sizeof(int16_t);
+        *totalDataSize += samplesThisLoop * 2 * sizeof(int16_t);
+        samplesToGenerate -= samplesThisLoop;
+    }
 }
 
-int main() {
+int main()
+{
     FILE *file = fopen("output.wav", "wb");
-    if (file == NULL) {
+    uint32_t totalDataSize;
+    char input;
+    if (file == NULL)
+    {
         printf("Error opening file for writing.\n");
-        return -1;
+        return (-1);
     }
 
     write_wav_header(file);  // Write initial header
 
-    AudioData data = {0, 1}; // Start with sound playing
-    uint32_t totalDataSize = 0;
+    AudioData data = {0, FREQUENCIES[0]}; // Start at C4
+    totalDataSize = 0;
 
-    printf("Press SPACE to toggle sound, Q to quit.\n");
+    printf("Press 0-7 to play a note then press enter. Q to quit.\n");
 
     while (1) {
-        generate_audio_data(file, &data, &totalDataSize);
+        input = get_user_input();
 
-        // Check for user input without blocking
-        if (check_keyboard_input()) {
-            char input = getchar();
-            if (input == ' ') {
-                data.playing = !data.playing;
-                printf("%s sound\n", data.playing ? "Starting" : "Stopping");
-            } else if (input == 'q' || input == 'Q') {
-                break;
-            }
+        if (input >= '0' && input <= '7') {
+            data.frequency = FREQUENCIES[input - '0'];
+            printf("Playing %.2f Hz\n", data.frequency);
+            generate_note(file, &data, &totalDataSize);
+        } else if (input == 'q' || input == 'Q') {
+            break;
         }
-
-        usleep(5000); // Small delay to allow smooth execution
     }
 
     update_wav_header(file, totalDataSize); // Fix header with actual data size
